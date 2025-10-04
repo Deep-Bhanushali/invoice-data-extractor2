@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Batch Document to CSV Extractor</title>
+    <style>
+        /* CSS styles remain the same... */
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f0f2f5; color: #1c1e21; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; padding: 20px; }
+        .container { background-color: #ffffff; padding: 2rem; border-radius: 8px; box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1); width: 100%; max-width: 600px; box-sizing: border-box; }
+        h1 { color: #0d6efd; text-align: center; margin-bottom: 1.5rem; }
+        .input-group { margin-bottom: 1.5rem; }
+        label { display: block; font-weight: 600; margin-bottom: 0.5rem; }
+        input[type="file"] { width: 100%; padding: 0.75rem; border: 1px solid #ccd0d5; border-radius: 6px; box-sizing: border-box; font-size: 1rem; }
+        button { width: 100%; padding: 0.75rem; background-color: #0d6efd; color: white; border: none; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background-color 0.2s; }
+        button:hover:not(:disabled) { background-color: #0b5ed7; }
+        button:disabled { background-color: #6c757d; cursor: not-allowed; }
+        .status-area { margin-top: 1.5rem; background-color: #e9ecef; padding: 1rem; border-radius: 6px; display: none; min-height: 50px; }
+        .status-area p { margin: 0; padding: 0.25rem 0; }
+        .status-area .error-log { color: #dc3545; font-size: 0.9em; }
+        .results { margin-top: 2rem; text-align: center; display: none; }
+        h2 { text-align: center; color: #198754; }
+        .download-btn { background-color: #198754; display: none; margin: 1rem auto 0; width: auto; padding: 0.75rem 1.5rem; }
+        .download-btn:hover { background-color: #157347; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Invoice & Receipt Data Extractor</h1>
+        <div class="input-group">
+            <label for="invoiceImages">Upload Invoices or Receipts</label>
+            <input type="file" id="invoiceImages" accept="image/png, image/jpeg, image/webp, application/pdf" multiple>
+            <small style="color: #6c757d; font-size: 0.9em;">Supported formats: PNG, JPEG, WebP, PDF</small>
+        </div>
+        <button id="extractBtn">Extract Data from All Files</button>
+        <div class="status-area" id="statusArea"></div>
+        <div class="results" id="results">
+            <h2 id="finalMessage"></h2>
+            <button id="downloadBtn" class="download-btn">Download Combined CSV</button>
+        </div>
+    </div>
+
+    <script>
+        const extractBtn = document.getElementById('extractBtn');
+        const imageInput = document.getElementById('invoiceImages');
+        const statusArea = document.getElementById('statusArea');
+        const resultsDiv = document.getElementById('results');
+        const finalMessage = document.getElementById('finalMessage');
+        const downloadBtn = document.getElementById('downloadBtn');
+        
+        let generatedCsvContent = "";
+        let apiKey = null;
+
+        async function getApiKey() {
+            if (apiKey) return apiKey;
+            try {
+                const response = await fetch('/api/key');
+                if (!response.ok) throw new Error(`Server responded with status ${response.status}`);
+                const data = await response.json();
+                apiKey = data.apiKey;
+                return apiKey;
+            } catch (error) {
+                throw new Error("Could not fetch the API key. Ensure the backend server is running correctly.");
+            }
+        }
+
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = error => reject(error);
+        });
+
+        const callGeminiAPI = async (apiKey, content, type) => {
+            const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            let prompt = `
+                You are a highly accurate data extraction system. Your only job is to return a clean JSON object based on the provided document content.
+
+                **JSON Schema & Rules:**
+                The root object must have these keys: "invoice_details", "vendor_details", "customer_details", "line_items", "summary".
+
+                1.  "invoice_details": { "invoice_no": "string", "invoice_date": "string (YYYY-MM-DD)", "due_date": "string (YYYY-MM-DD)" }
+                2.  "vendor_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                3.  "customer_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                4.  "line_items": [ { "sl_no": "number", "description": "string", "hsn_no": "string", "qty": "number", "rate": "number", "amount": "number" } ]
+                5.  "summary": { "total": "number", "discount": "number", "taxable_amount": "number", "sgst": "number", "cgst": "number", "payable_amount": "number" }
+
+                **Formatting Instructions:**
+                - **CRITICAL:** Every key in the JSON object (e.g., "vendor_name") MUST be enclosed in double quotes. Do not use single quotes or leave keys unquoted.
+                - If a value for ANY field is not found, you MUST use \`null\` as its value.
+                - All monetary values and quantities MUST be numbers. Remove currency symbols and commas.
+                - All dates MUST be in 'YYYY-MM-DD' format.
+                - Your entire output must be ONLY the JSON object. Do not include markdown like \`\`\`json or any other text.
+            `;
+
+            // Add specific instructions for text-based content (PDFs)
+            if (type === 'text') {
+                prompt += `
+
+                **Text Content Processing:**
+                - The provided content is extracted text from a PDF document
+                - CAREFULLY EXAMINE THE TEXT FOR MULTIPLE INVOICES
+                - If multiple invoices are found, return a JSON ARRAY of objects, one for each invoice
+                - Each invoice object must follow the same schema: {"invoice_details", "vendor_details", "customer_details", "line_items", "summary"}
+                - Look for patterns like: "Invoice #", "Invoice No:", "Bill To:", "Total:", "Amount Due:"
+                - Separate invoices are often indicated by: page breaks, different invoice numbers, or repeated sections
+                - If only one invoice is found, return a single JSON object (not an array)
+                - Extract numbers, dates, and addresses exactly as they appear
+                - Pay special attention to tabular data for line items
+                - If the text seems garbled or incomplete, still extract what's available
+                `;
+            }
+
+            let payload;
+            if (type === 'image') {
+                payload = { "contents": [{ "parts": [{ "text": prompt }, { "inline_data": { "mime_type": "image/jpeg", "data": content } }] }] };
+            } else if (type === 'text') {
+                payload = { "contents": [{ "parts": [{ "text": prompt + "\n\nDocument Content:\n" + content }] }] };
+            }
+
+            const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error.message || "An unknown API error occurred.");
+            }
+            const data = await response.json();
+            if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0].text) {
+                return data.candidates[0].content.parts[0].text;
+            } else {
+                throw new Error("The API response was empty or malformed.");
+            }
+        };
+
+        // --- IMPROVED FUNCTION TO CLEAN AND PARSE JSON ---
+        function findAndParseJson(rawText) {
+            console.log("🔍 Parsing AI response...", rawText.length, "characters");
+
+            // Strategy 1: Try to parse the entire response first (most common case)
+            try {
+                const parsed = JSON.parse(rawText.trim());
+                if (typeof parsed === 'object' && parsed !== null) {
+                    console.log("✅ Successfully parsed entire response");
+                    return parsed;
+                }
+            } catch (e) {
+                console.log("❌ Full parse failed, trying extraction strategies");
+            }
+
+            // Strategy 2: Extract JSON from mixed content
+            let jsonString = "";
+
+            // Look for array or object start
+            const arrayStart = rawText.indexOf('[');
+            const objectStart = rawText.indexOf('{');
+
+            let startIndex = -1;
+            if (arrayStart !== -1 && objectStart !== -1) {
+                // Both found, use the first one
+                startIndex = Math.min(arrayStart, objectStart);
+            } else if (arrayStart !== -1) {
+                startIndex = arrayStart;
+            } else if (objectStart !== -1) {
+                startIndex = objectStart;
+            }
+
+            if (startIndex !== -1) {
+                // Find the matching end bracket/brace
+                const isArray = rawText[startIndex] === '[';
+                const openChar = isArray ? '[' : '{';
+                const closeChar = isArray ? ']' : '}';
+
+                let depth = 0;
+                let endIndex = -1;
+
+                for (let i = startIndex; i < rawText.length; i++) {
+                    if (rawText[i] === openChar) {
+                        depth++;
+                    } else if (rawText[i] === closeChar) {
+                        depth--;
+                        if (depth === 0) {
+                            endIndex = i;
+                            break;
+                        }
+                    }
+                }
+
+                if (endIndex !== -1) {
+                    jsonString = rawText.substring(startIndex, endIndex + 1);
+                    console.log("✅ Extracted JSON:", jsonString.substring(0, 100) + "...");
+                }
+            }
+
+            // Strategy 3: Try to find JSON in code blocks
+            if (!jsonString || jsonString.length < 10) {
+                const jsonBlockMatch = rawText.match(/```(?:json)?\s*(\[?\{[\s\S]*?\}\]?)\s*```/);
+                if (jsonBlockMatch) {
+                    jsonString = jsonBlockMatch[1];
+                    console.log("✅ Found JSON in code block");
+                }
+            }
+
+            // Strategy 4: Try to find well-formed JSON objects/arrays
+            if (!jsonString || jsonString.length < 10) {
+                // Look for arrays first (start with [)
+                const arrayMatch = rawText.match(/(\[[\s\S]*?\])/);
+                if (arrayMatch) {
+                    jsonString = arrayMatch[1];
+                    console.log("✅ Found JSON array");
+                } else {
+                    // Look for objects (start with {)
+                    const objectMatch = rawText.match(/(\{[\s\S]*?\})/);
+                    if (objectMatch) {
+                        jsonString = objectMatch[1];
+                        console.log("✅ Found JSON object");
+                    }
+                }
+            }
+
+            if (!jsonString || jsonString.length < 10) {
+                console.error("❌ Could not extract JSON. Raw response:", rawText.substring(0, 300) + "...");
+                throw new Error("Could not find a valid JSON object in the AI response. The response may not contain structured data.");
+            }
+
+            // Clean up the JSON string
+            jsonString = jsonString.trim();
+
+            try {
+                const parsed = JSON.parse(jsonString);
+
+                // Validate that we got a proper structure
+                if (typeof parsed !== 'object' || parsed === null) {
+                    throw new Error("Parsed JSON is not a valid object");
+                }
+
+                console.log("✅ Successfully parsed extracted JSON");
+                return parsed;
+            } catch (error) {
+                console.error("❌ JSON parse failed:", jsonString.substring(0, 200) + "...");
+                console.error("Parse error:", error.message);
+
+                // Try to fix common JSON issues
+                try {
+                    // Fix trailing commas
+                    let fixedJson = jsonString.replace(/,(\s*[}\]])/g, '$1');
+                    // Fix missing commas between properties
+                    fixedJson = fixedJson.replace(/}(\s*")([^:])/g, '},$1$2');
+                    // Fix unquoted keys (basic fix)
+                    fixedJson = fixedJson.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
+
+                    const parsedFixed = JSON.parse(fixedJson);
+                    console.log("✅ Successfully parsed JSON after fixes");
+                    return parsedFixed;
+                } catch (fixError) {
+                    console.error("❌ All parsing attempts failed");
+                    throw new Error(`Failed to parse AI response even after fixes: ${error.message}. Raw response: ${rawText.substring(0, 200)}...`);
+                }
+            }
+        }
+        
+        const generateCombinedCsv = (allInvoicesData) => {
+            const headers = [ 'sl_no', 'description', 'hsn_no', 'qty', 'rate', 'amount', 'invoice_no', 'invoice_date', 'due_date', 'vendor_name', 'vendor_address', 'vendor_gstin', 'vendor_phone', 'customer_name', 'customer_address', 'customer_phone', 'customer_gstin', 'total', 'discount', 'taxable_amount', 'sgst', 'cgst', 'payable_amount' ];
+            const escapeCsvCell = (cell) => { const cellStr = String(cell === null || cell === undefined ? '' : cell); if (cellStr.includes(',')) return `"${cellStr.replace(/"/g, '""')}"`; return cellStr; };
+            const allRows = [];
+            for (const jsonData of allInvoicesData) {
+                const { invoice_details, vendor_details, customer_details, line_items, summary } = jsonData;
+                const mainDetails = [ invoice_details?.invoice_no, invoice_details?.invoice_date, invoice_details?.due_date, vendor_details?.name, vendor_details?.address, vendor_details?.gstin, vendor_details?.phone, customer_details?.name, customer_details?.address, customer_details?.phone, customer_details?.gstin, summary?.total, summary?.discount, summary?.taxable_amount, summary?.sgst, summary?.cgst, summary?.payable_amount ].map(escapeCsvCell);
+                if (line_items && Array.isArray(line_items)) {
+                    for (const item of line_items) {
+                        const itemDetails = [ item.sl_no, item.description, item.hsn_no, item.qty, item.rate, item.amount ].map(escapeCsvCell);
+                        allRows.push([...itemDetails, ...mainDetails].join(','));
+                    }
+                }
+            }
+            return [headers.join(','), ...allRows].join('\n');
+        };
+
+        extractBtn.addEventListener('click', async () => {
+            const files = imageInput.files;
+            if (files.length === 0) {
+                alert("Please select at least one document image.");
+                return;
+            }
+
+            extractBtn.disabled = true;
+            statusArea.style.display = 'block';
+            statusArea.innerHTML = '';
+            resultsDiv.style.display = 'none';
+            downloadBtn.style.display = 'none';
+            
+            const allExtractedData = [];
+            let successCount = 0;
+            let errorCount = 0;
+
+            try {
+                const currentApiKey = await getApiKey();
+
+                for (let i = 0; i < files.length; i++) {
+                    const file = files[i];
+                    const statusP = document.createElement('p');
+                    statusP.textContent = `Processing file ${i + 1} of ${files.length}: ${file.name}...`;
+                    statusArea.appendChild(statusP);
+
+                    try {
+                        let rawResponse;
+
+                        if (file.type === 'application/pdf') {
+                            // Process PDF files using server endpoint
+                            const formData = new FormData();
+                            formData.append('pdf', file);
+
+                            const processResponse = await fetch('/api/process-pdf', {
+                                method: 'POST',
+                                body: formData
+                            });
+
+                            if (!processResponse.ok) {
+                                throw new Error(`Server processing failed: ${processResponse.statusText}`);
+                            }
+
+                            const processData = await processResponse.json();
+
+                            if (processData.type === 'pdf' && processData.text) {
+                                console.log(`PDF text extracted (${processData.text.length} characters):`, processData.text.substring(0, 200) + '...');
+
+                                // Use PDF text content with Gemini API
+                                rawResponse = await callGeminiAPI(currentApiKey, processData.text, 'text');
+
+                                console.log(`AI response for PDF (${rawResponse.length} characters):`, rawResponse.substring(0, 200) + '...');
+                            } else {
+                                console.error('PDF processing failed:', processData);
+                                throw new Error('PDF processing failed or no text extracted');
+                            }
+                        } else {
+                            // Process image files directly
+                            const imageBase64 = await fileToBase64(file);
+                            rawResponse = await callGeminiAPI(currentApiKey, imageBase64, 'image');
+                        }
+
+                        // --- USE THE NEW ROBUST PARSING FUNCTION ---
+                        const jsonData = findAndParseJson(rawResponse);
+
+                        // Handle both single invoice objects and arrays of invoices
+                        if (Array.isArray(jsonData)) {
+                            console.log(`Found ${jsonData.length} invoices in PDF`);
+                            allExtractedData.push(...jsonData);
+                            successCount += jsonData.length;
+                            statusP.textContent += ` ✅ Success (${jsonData.length} invoices)`;
+                        } else {
+                            console.log(`Found single invoice in document`);
+                            allExtractedData.push(jsonData);
+                            successCount++;
+                            statusP.textContent += " ✅ Success";
+                        }
+                    } catch (error) {
+                        console.error(`Error on file ${file.name}:`, error);
+                        errorCount++;
+                        statusP.textContent += " ❌ Failed";
+                        const errorLog = document.createElement('p');
+                        errorLog.className = 'error-log';
+                        errorLog.textContent = `   └─ Error: ${error.message}`;
+                        statusArea.appendChild(errorLog);
+                    }
+                }
+            } catch (error) {
+                statusArea.innerHTML = `<p class="error-log">${error.message}</p>`;
+            }
+
+            if (successCount > 0) {
+                generatedCsvContent = generateCombinedCsv(allExtractedData);
+                const totalFiles = files.length;
+                const totalInvoices = allExtractedData.length;
+                finalMessage.textContent = `Processing complete! Successfully extracted ${totalInvoices} invoice${totalInvoices > 1 ? 's' : ''} from ${totalFiles} file${totalFiles > 1 ? 's' : ''}.`;
+                resultsDiv.style.display = 'block';
+                downloadBtn.style.display = 'inline-block';
+            } else if (errorCount > 0) {
+                finalMessage.textContent = `Processing failed. Please check the errors above.`;
+                resultsDiv.style.display = 'block';
+            }
+
+            extractBtn.disabled = false;
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            if (!generatedCsvContent) return;
+            const blob = new Blob([generatedCsvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'combined_documents_data.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+    </script>
+</body>
+</html>

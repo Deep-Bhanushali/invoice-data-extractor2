@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invoice to CSV Extractor</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            color: #1c1e21;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #0d6efd;
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .input-group {
+            margin-bottom: 1.5rem;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        input[type="text"],
+        input[type="file"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ccd0d5;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 1rem;
+        }
+        input[type="text"]:focus {
+            border-color: #0d6efd;
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+        }
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #0d6efd;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover:not(:disabled) {
+            background-color: #0b5ed7;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .loader {
+            display: none;
+            margin: 1.5rem auto;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid #0d6efd;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+        .results {
+            margin-top: 2rem;
+            display: none;
+        }
+        h2 {
+            text-align: center;
+            color: #198754;
+        }
+        pre {
+            background-color: #e9ecef;
+            padding: 1rem;
+            border-radius: 6px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .download-btn {
+            background-color: #198754;
+        }
+        .download-btn:hover {
+            background-color: #157347;
+        }
+        .error {
+            color: #dc3545;
+            background-color: #f8d7da;
+            border: 1px solid #f5c2c7;
+            padding: 1rem;
+            border-radius: 6px;
+            text-align: center;
+            margin-top: 1.5rem;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Invoice to CSV Extractor</h1>
+        
+        <div class="input-group">
+            <label for="apiKey">Your Google AI Studio API Key</label>
+            <input type="text" id="apiKey" placeholder="Paste your API key here">
+        </div>
+
+        <div class="input-group">
+            <label for="invoiceImage">Upload Invoice Image</label>
+            <input type="file" id="invoiceImage" accept="image/png, image/jpeg, image/webp">
+        </div>
+
+        <button id="extractBtn">Extract Data</button>
+
+        <div class="loader" id="loader"></div>
+        <div class="error" id="error"></div>
+
+        <div class="results" id="results">
+            <h2>Extraction Successful!</h2>
+            <pre id="csvOutput"></pre>
+            <button id="downloadBtn" class="download-btn">Download CSV</button>
+        </div>
+    </div>
+
+    <script>
+        const extractBtn = document.getElementById('extractBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const apiKeyInput = document.getElementById('apiKey');
+        const imageInput = document.getElementById('invoiceImage');
+        const loader = document.getElementById('loader');
+        const resultsDiv = document.getElementById('results');
+        const csvOutput = document.getElementById('csvOutput');
+        const errorDiv = document.getElementById('error');
+        
+        let generatedCsvContent = "";
+
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = error => reject(error);
+        });
+
+        const callGeminiAPI = async (apiKey, imageBase64) => {
+            // NOTE: Using the model name you provided. If errors occur, revert to 'gemini-pro-vision'.
+            const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+
+            // --- NEW IMPROVED PROMPT ---
+            const prompt = `
+                You are a highly accurate, automated data entry system. Your sole purpose is to extract data from the provided invoice image and return it as a single, clean JSON object. Adhere strictly to the requested schema and rules.
+
+                **JSON Schema Requirements:**
+                The root object must contain these exact keys: "invoice_details", "vendor_details", "customer_details", "line_items", and "summary".
+
+                1.  "invoice_details": {
+                        "invoice_no": "string",
+                        "invoice_date": "string (YYYY-MM-DD)",
+                        "due_date": "string (YYYY-MM-DD)"
+                    }
+                2.  "vendor_details": {
+                        "name": "string",
+                        "address": "string",
+                        "gstin": "string",
+                        "phone": "string"
+                    }
+                3.  "customer_details": {
+                        "name": "string",
+                        "address": "string",
+                        "gstin": "string",
+                        "phone": "string"
+                    }
+                4.  "line_items": [
+                        {
+                            "sl_no": "number",
+                            "description": "string",
+                            "hsn_no": "string",
+                            "qty": "number",
+                            "rate": "number",
+                            "amount": "number"
+                        }
+                    ]
+                5.  "summary": {
+                        "total": "number",
+                        "discount": "number",
+                        "taxable_amount": "number",
+                        "sgst": "number",
+                        "cgst": "number",
+                        "payable_amount": "number"
+                    }
+
+                **Data Formatting & Cleaning Rules:**
+                - **Crucial:** If a value for any field is not found on the invoice, you MUST use \`null\` as its value. Do not omit the key.
+                - **Numbers:** All monetary values and quantities MUST be extracted as numbers only. Remove all currency symbols (like 'Rs.', '$', '€') and commas before converting.
+                - **Dates:** All dates MUST be converted to a strict 'YYYY-MM-DD' format.
+                - **Output:** The final output must be ONLY the JSON object, with no markdown formatting (like \`\`\`json) or any other explanatory text.
+            `;
+
+            const payload = {
+                "contents": [{
+                    "parts": [
+                        { "text": prompt },
+                        {
+                            "inline_data": {
+                                "mime_type": "image/jpeg",
+                                "data": imageBase64
+                            }
+                        }
+                    ]
+                }]
+            };
+
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                const specificError = errorData.error.message || "An unknown API error occurred.";
+                throw new Error(`API Error: ${specificError}. Please check your API key and project configuration.`);
+            }
+
+            const data = await response.json();
+            // Add extra checks to find the text part, making it more robust
+            if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0].text) {
+                return data.candidates[0].content.parts[0].text;
+            } else {
+                throw new Error("Could not find the text response in the API output. The model may have refused to answer.");
+            }
+        };
+        
+        const jsonToCsv = (jsonData) => {
+            const { invoice_details, vendor_details, customer_details, line_items, summary } = jsonData;
+            
+            const headers = [
+                'sl_no', 'description', 'hsn_no', 'qty', 'rate', 'amount',
+                'invoice_no', 'invoice_date', 'due_date',
+                'vendor_name', 'vendor_address', 'vendor_gstin', 'vendor_phone',
+                'customer_name', 'customer_address', 'customer_phone', 'customer_gstin',
+                'total', 'discount', 'taxable_amount', 'sgst', 'cgst', 'payable_amount'
+            ];
+
+            const escapeCsvCell = (cell) => {
+                const cellStr = String(cell === null || cell === undefined ? '' : cell);
+                if (cellStr.includes(',')) {
+                    return `"${cellStr.replace(/"/g, '""')}"`;
+                }
+                return cellStr;
+            };
+
+            const mainDetails = [
+                invoice_details?.invoice_no, invoice_details?.invoice_date, invoice_details?.due_date,
+                vendor_details?.name, vendor_details?.address, vendor_details?.gstin, vendor_details?.phone,
+                customer_details?.name, customer_details?.address, customer_details?.phone, customer_details?.gstin,
+                summary?.total, summary?.discount, summary?.taxable_amount, summary?.sgst, summary?.cgst, summary?.payable_amount
+            ].map(escapeCsvCell);
+            
+            const rows = line_items.map(item => {
+                const itemDetails = [
+                    item.sl_no, item.description, item.hsn_no, item.qty, item.rate, item.amount
+                ].map(escapeCsvCell);
+                return [...itemDetails, ...mainDetails].join(',');
+            });
+            
+            return [headers.join(','), ...rows].join('\n');
+        };
+
+        extractBtn.addEventListener('click', async () => {
+            const apiKey = apiKeyInput.value.trim();
+            const imageFile = imageInput.files[0];
+
+            if (!apiKey || !imageFile) {
+                alert("Please provide both an API Key and an invoice image.");
+                return;
+            }
+
+            loader.style.display = 'block';
+            extractBtn.disabled = true;
+            resultsDiv.style.display = 'none';
+            errorDiv.style.display = 'none';
+            
+            try {
+                const imageBase64 = await fileToBase64(imageFile);
+                const rawResponse = await callGeminiAPI(apiKey, imageBase64);
+                
+                const cleanedResponse = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+                const jsonData = JSON.parse(cleanedResponse);
+
+                generatedCsvContent = jsonToCsv(jsonData);
+                csvOutput.textContent = generatedCsvContent;
+                resultsDiv.style.display = 'block';
+
+            } catch (error) {
+                console.error(error);
+                errorDiv.textContent = error.message;
+                errorDiv.style.display = 'block';
+            } finally {
+                loader.style.display = 'none';
+                extractBtn.disabled = false;
+            }
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            if (!generatedCsvContent) return;
+            const blob = new Blob([generatedCsvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'invoice_data.csv');
+            link.style.visibility = 'hidden';
+            
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+    </script>
+</body>
+</html>

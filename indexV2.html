@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Batch Invoice to CSV Extractor</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f0f2f5;
+            color: #1c1e21;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            background-color: #ffffff;
+            padding: 2rem;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+            width: 100%;
+            max-width: 600px;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #0d6efd;
+            text-align: center;
+            margin-bottom: 1.5rem;
+        }
+        .input-group {
+            margin-bottom: 1.5rem;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 0.5rem;
+        }
+        input[type="text"],
+        input[type="file"] {
+            width: 100%;
+            padding: 0.75rem;
+            border: 1px solid #ccd0d5;
+            border-radius: 6px;
+            box-sizing: border-box;
+            font-size: 1rem;
+        }
+        input[type="text"]:focus {
+            border-color: #0d6efd;
+            outline: none;
+            box-shadow: 0 0 0 2px rgba(13, 110, 253, 0.25);
+        }
+        button {
+            width: 100%;
+            padding: 0.75rem;
+            background-color: #0d6efd;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover:not(:disabled) {
+            background-color: #0b5ed7;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .status-area {
+            margin-top: 1.5rem;
+            background-color: #e9ecef;
+            padding: 1rem;
+            border-radius: 6px;
+            display: none;
+            min-height: 50px;
+        }
+        .status-area p {
+            margin: 0;
+            padding: 0.25rem 0;
+        }
+        .status-area .error-log {
+            color: #dc3545;
+            font-size: 0.9em;
+        }
+        .results {
+            margin-top: 2rem;
+            text-align: center;
+            display: none;
+        }
+        h2 {
+            text-align: center;
+            color: #198754;
+        }
+        .download-btn {
+            background-color: #198754;
+            display: none;
+            margin: 1rem auto 0;
+            width: auto;
+            padding: 0.75rem 1.5rem;
+        }
+        .download-btn:hover {
+            background-color: #157347;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Batch Invoice to CSV Extractor</h1>
+        
+        <div class="input-group">
+            <label for="invoiceImages">Upload Invoice Images</label>
+            <!-- IMPORTANT: Added the 'multiple' attribute -->
+            <input type="file" id="invoiceImages" accept="image/png, image/jpeg, image/webp" multiple>
+        </div>
+
+        <button id="extractBtn">Extract Data from All Files</button>
+
+        <div class="status-area" id="statusArea"></div>
+
+        <div class="results" id="results">
+            <h2 id="finalMessage"></h2>
+            <button id="downloadBtn" class="download-btn">Download Combined CSV</button>
+        </div>
+    </div>
+
+    <script>
+        const extractBtn = document.getElementById('extractBtn');
+        const downloadBtn = document.getElementById('downloadBtn');
+        const apiKeyInput = document.getElementById('apiKey');
+        const imageInput = document.getElementById('invoiceImages');
+        const statusArea = document.getElementById('statusArea');
+        const resultsDiv = document.getElementById('results');
+        const finalMessage = document.getElementById('finalMessage');
+        
+        let generatedCsvContent = "";
+
+        const fileToBase64 = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.readAsDataURL(file);
+            reader.onload = () => resolve(reader.result.split(',')[1]);
+            reader.onerror = error => reject(error);
+        });
+
+        const callGeminiAPI = async (apiKey, imageBase64) => {
+            const API_KEY = process.env.API_KEY;
+            const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            const prompt = `
+                You are a highly accurate, automated data entry system. Your sole purpose is to extract data from the provided invoice image and return it as a single, clean JSON object. Adhere strictly to the requested schema and rules.
+
+                **JSON Schema Requirements:**
+                The root object must contain these exact keys: "invoice_details", "vendor_details", "customer_details", "line_items", and "summary".
+
+                1.  "invoice_details": { "invoice_no": "string", "invoice_date": "string (YYYY-MM-DD)", "due_date": "string (YYYY-MM-DD)" }
+                2.  "vendor_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                3.  "customer_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                4.  "line_items": [ { "sl_no": "number", "description": "string", "hsn_no": "string", "qty": "number", "rate": "number", "amount": "number" } ]
+                5.  "summary": { "total": "number", "discount": "number", "taxable_amount": "number", "sgst": "number", "cgst": "number", "payable_amount": "number" }
+
+                **Data Formatting & Cleaning Rules:**
+                - **Crucial:** If a value for any field is not found on the invoice, you MUST use \`null\` as its value. Do not omit the key.
+                - **Numbers:** All monetary values and quantities MUST be extracted as numbers only. Remove all currency symbols (like 'Rs.', '$', '€') and commas.
+                - **Dates:** All dates MUST be converted to a strict 'YYYY-MM-DD' format.
+                - **Output:** The final output must be ONLY the JSON object, with no markdown formatting (like \`\`\`json) or any other explanatory text.
+            `;
+
+            const payload = { "contents": [{ "parts": [{ "text": prompt }, { "inline_data": { "mime_type": "image/jpeg", "data": imageBase64 } }] }] };
+
+            const response = await fetch(API_URL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error.message || "An unknown API error occurred.");
+            }
+
+            const data = await response.json();
+            if (data.candidates && data.candidates[0].content && data.candidates[0].content.parts && data.candidates[0].content.parts[0].text) {
+                return data.candidates[0].content.parts[0].text;
+            } else {
+                throw new Error("Could not find a valid text response from the API.");
+            }
+        };
+        
+        // This function now takes an array of all extracted invoice data
+        const generateCombinedCsv = (allInvoicesData) => {
+            const headers = [
+                'sl_no', 'description', 'hsn_no', 'qty', 'rate', 'amount',
+                'invoice_no', 'invoice_date', 'due_date',
+                'vendor_name', 'vendor_address', 'vendor_gstin', 'vendor_phone',
+                'customer_name', 'customer_address', 'customer_phone', 'customer_gstin',
+                'total', 'discount', 'taxable_amount', 'sgst', 'cgst', 'payable_amount'
+            ];
+
+            const escapeCsvCell = (cell) => {
+                const cellStr = String(cell === null || cell === undefined ? '' : cell);
+                if (cellStr.includes(',')) return `"${cellStr.replace(/"/g, '""')}"`;
+                return cellStr;
+            };
+
+            const allRows = [];
+            
+            // Loop through each invoice's data
+            for (const jsonData of allInvoicesData) {
+                const { invoice_details, vendor_details, customer_details, line_items, summary } = jsonData;
+                
+                const mainDetails = [
+                    invoice_details?.invoice_no, invoice_details?.invoice_date, invoice_details?.due_date,
+                    vendor_details?.name, vendor_details?.address, vendor_details?.gstin, vendor_details?.phone,
+                    customer_details?.name, customer_details?.address, customer_details?.phone, customer_details?.gstin,
+                    summary?.total, summary?.discount, summary?.taxable_amount, summary?.sgst, summary?.cgst, summary?.payable_amount
+                ].map(escapeCsvCell);
+
+                if (line_items && line_items.length > 0) {
+                    for (const item of line_items) {
+                        const itemDetails = [
+                            item.sl_no, item.description, item.hsn_no, item.qty, item.rate, item.amount
+                        ].map(escapeCsvCell);
+                        allRows.push([...itemDetails, ...mainDetails].join(','));
+                    }
+                }
+            }
+            
+            return [headers.join(','), ...allRows].join('\n');
+        };
+
+        extractBtn.addEventListener('click', async () => {
+            const files = imageInput.files;
+
+
+            // --- UI Reset and Setup for Batch Processing ---
+            extractBtn.disabled = true;
+            resultsDiv.style.display = 'none';
+            downloadBtn.style.display = 'none';
+            statusArea.style.display = 'block';
+            statusArea.innerHTML = '';
+            
+            const allExtractedData = [];
+            let successCount = 0;
+            let errorCount = 0;
+
+            // --- Loop Through Each File ---
+            for (let i = 0; i < files.length; i++) {
+                const file = files[i];
+                const statusP = document.createElement('p');
+                statusP.textContent = `Processing file ${i + 1} of ${files.length}: ${file.name}...`;
+                statusArea.appendChild(statusP);
+
+                try {
+                    const imageBase64 = await fileToBase64(file);
+                    const rawResponse = await callGeminiAPI(apiKey, imageBase64);
+                    const cleanedResponse = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();
+                    const jsonData = JSON.parse(cleanedResponse);
+                    
+                    allExtractedData.push(jsonData);
+                    successCount++;
+                    statusP.textContent += " ✅ Success";
+
+                } catch (error) {
+                    console.error(`Error on file ${file.name}:`, error);
+                    errorCount++;
+                    statusP.textContent += " ❌ Failed";
+                    const errorLog = document.createElement('p');
+                    errorLog.className = 'error-log';
+                    errorLog.textContent = `   └─ Error: ${error.message}`;
+                    statusArea.appendChild(errorLog);
+                }
+            }
+
+            // --- Finalize and Display Results ---
+            if (successCount > 0) {
+                generatedCsvContent = generateCombinedCsv(allExtractedData);
+                finalMessage.textContent = `Processing complete! Successfully extracted ${successCount} of ${files.length} invoices.`;
+                resultsDiv.style.display = 'block';
+                downloadBtn.style.display = 'inline-block';
+            } else {
+                finalMessage.textContent = `Processing failed for all ${files.length} files. Please check the errors above.`;
+                resultsDiv.style.display = 'block';
+            }
+
+            extractBtn.disabled = false;
+        });
+
+        downloadBtn.addEventListener('click', () => {
+            if (!generatedCsvContent) return;
+            const blob = new Blob([generatedCsvContent], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement('a');
+            const url = URL.createObjectURL(blob);
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'combined_invoice_data.csv');
+            link.style.visibility = 'hidden';
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
+
+    </script>
+</body>
+</html>
