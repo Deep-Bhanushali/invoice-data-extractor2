@@ -72,42 +72,39 @@
         });
 
         const callGeminiAPI = async (apiKey, content, type) => {
-            const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`;
+            const API_URL = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`; // Using your specified model
+            
+            // --- MODIFICATION 1: UPGRADED PROMPT ---
             let prompt = `
                 You are a highly accurate data extraction system. Your only job is to return a clean JSON object based on the provided document content.
 
                 **JSON Schema & Rules:**
-                The root object must have these keys: "invoice_details", "vendor_details", "customer_details", "line_items", "summary".
+                The root object must have these exact keys: "invoice_details", "vendor_details", "billed_to_details", "shipped_to_details", "line_items", and "summary".
 
                 1.  "invoice_details": { "invoice_no": "string", "invoice_date": "string (YYYY-MM-DD)", "due_date": "string (YYYY-MM-DD)" }
                 2.  "vendor_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
-                3.  "customer_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
-                4.  "line_items": [ { "sl_no": "number", "description": "string", "hsn_no": "string", "qty": "number", "rate": "number", "amount": "number" } ]
-                5.  "summary": { "total": "number", "discount": "number", "taxable_amount": "number", "sgst": "number", "cgst": "number", "payable_amount": "number" }
+                3.  "billed_to_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                4.  "shipped_to_details": { "name": "string", "address": "string", "gstin": "string", "phone": "string" }
+                5.  "line_items": [ { "sl_no": "number", "description": "string", "hsn_no": "string", "qty": "number", "rate": "number", "amount": "number" } ]
+                6.  "summary": { "total": "number", "discount": "number", "taxable_amount": "number", "sgst": "number", "cgst": "number", "payable_amount": "number" }
 
                 **Formatting Instructions:**
-                - **CRITICAL:** Every key in the JSON object (e.g., "vendor_name") MUST be enclosed in double quotes. Do not use single quotes or leave keys unquoted.
-                - If a value for ANY field is not found, you MUST use \`null\` as its value.
-                - All monetary values and quantities MUST be numbers. Remove currency symbols and commas.
+                - Find the "Billed to" section and map it to "billed_to_details".
+                - Find the "Shipped to" section and map it to "shipped_to_details". If they appear the same, populate both with the same information.
+                - **CRITICAL:** If a value for ANY field is not found, you MUST use \`null\` as its value.
+                - All monetary values MUST be numbers. Remove currency symbols and commas.
                 - All dates MUST be in 'YYYY-MM-DD' format.
                 - Your entire output must be ONLY the JSON object. Do not include markdown like \`\`\`json or any other text.
             `;
 
-            // Add specific instructions for text-based content (PDFs)
             if (type === 'text') {
                 prompt += `
 
                 **Text Content Processing:**
-                - The provided content is extracted text from a PDF document
-                - CAREFULLY EXAMINE THE TEXT FOR MULTIPLE INVOICES
-                - If multiple invoices are found, return a JSON ARRAY of objects, one for each invoice
-                - Each invoice object must follow the same schema: {"invoice_details", "vendor_details", "customer_details", "line_items", "summary"}
-                - Look for patterns like: "Invoice #", "Invoice No:", "Bill To:", "Total:", "Amount Due:"
-                - Separate invoices are often indicated by: page breaks, different invoice numbers, or repeated sections
-                - If only one invoice is found, return a single JSON object (not an array)
-                - Extract numbers, dates, and addresses exactly as they appear
-                - Pay special attention to tabular data for line items
-                - If the text seems garbled or incomplete, still extract what's available
+                - The provided content is extracted text from a PDF document.
+                - If you find multiple distinct invoices in the text, return a JSON ARRAY of objects, one for each invoice.
+                - Each object in the array must follow the schema defined above.
+                - If only one invoice is found, return a single JSON object (not an array).
                 `;
             }
 
@@ -131,11 +128,9 @@
             }
         };
 
-        // --- IMPROVED FUNCTION TO CLEAN AND PARSE JSON ---
+        // This function is unchanged from your working version
         function findAndParseJson(rawText) {
             console.log("🔍 Parsing AI response...", rawText.length, "characters");
-
-            // Strategy 1: Try to parse the entire response first (most common case)
             try {
                 const parsed = JSON.parse(rawText.trim());
                 if (typeof parsed === 'object' && parsed !== null) {
@@ -145,33 +140,23 @@
             } catch (e) {
                 console.log("❌ Full parse failed, trying extraction strategies");
             }
-
-            // Strategy 2: Extract JSON from mixed content
             let jsonString = "";
-
-            // Look for array or object start
             const arrayStart = rawText.indexOf('[');
             const objectStart = rawText.indexOf('{');
-
             let startIndex = -1;
             if (arrayStart !== -1 && objectStart !== -1) {
-                // Both found, use the first one
                 startIndex = Math.min(arrayStart, objectStart);
             } else if (arrayStart !== -1) {
                 startIndex = arrayStart;
             } else if (objectStart !== -1) {
                 startIndex = objectStart;
             }
-
             if (startIndex !== -1) {
-                // Find the matching end bracket/brace
                 const isArray = rawText[startIndex] === '[';
                 const openChar = isArray ? '[' : '{';
                 const closeChar = isArray ? ']' : '}';
-
                 let depth = 0;
                 let endIndex = -1;
-
                 for (let i = startIndex; i < rawText.length; i++) {
                     if (rawText[i] === openChar) {
                         depth++;
@@ -183,14 +168,11 @@
                         }
                     }
                 }
-
                 if (endIndex !== -1) {
                     jsonString = rawText.substring(startIndex, endIndex + 1);
                     console.log("✅ Extracted JSON:", jsonString.substring(0, 100) + "...");
                 }
             }
-
-            // Strategy 3: Try to find JSON in code blocks
             if (!jsonString || jsonString.length < 10) {
                 const jsonBlockMatch = rawText.match(/```(?:json)?\s*(\[?\{[\s\S]*?\}\]?)\s*```/);
                 if (jsonBlockMatch) {
@@ -198,16 +180,12 @@
                     console.log("✅ Found JSON in code block");
                 }
             }
-
-            // Strategy 4: Try to find well-formed JSON objects/arrays
             if (!jsonString || jsonString.length < 10) {
-                // Look for arrays first (start with [)
                 const arrayMatch = rawText.match(/(\[[\s\S]*?\])/);
                 if (arrayMatch) {
                     jsonString = arrayMatch[1];
                     console.log("✅ Found JSON array");
                 } else {
-                    // Look for objects (start with {)
                     const objectMatch = rawText.match(/(\{[\s\S]*?\})/);
                     if (objectMatch) {
                         jsonString = objectMatch[1];
@@ -215,55 +193,54 @@
                     }
                 }
             }
-
             if (!jsonString || jsonString.length < 10) {
                 console.error("❌ Could not extract JSON. Raw response:", rawText.substring(0, 300) + "...");
-                throw new Error("Could not find a valid JSON object in the AI response. The response may not contain structured data.");
+                throw new Error("Could not find a valid JSON object in the AI response.");
             }
-
-            // Clean up the JSON string
             jsonString = jsonString.trim();
-
             try {
                 const parsed = JSON.parse(jsonString);
-
-                // Validate that we got a proper structure
                 if (typeof parsed !== 'object' || parsed === null) {
                     throw new Error("Parsed JSON is not a valid object");
                 }
-
                 console.log("✅ Successfully parsed extracted JSON");
                 return parsed;
             } catch (error) {
                 console.error("❌ JSON parse failed:", jsonString.substring(0, 200) + "...");
                 console.error("Parse error:", error.message);
-
-                // Try to fix common JSON issues
                 try {
-                    // Fix trailing commas
                     let fixedJson = jsonString.replace(/,(\s*[}\]])/g, '$1');
-                    // Fix missing commas between properties
                     fixedJson = fixedJson.replace(/}(\s*")([^:])/g, '},$1$2');
-                    // Fix unquoted keys (basic fix)
                     fixedJson = fixedJson.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:/g, '$1"$2":');
-
                     const parsedFixed = JSON.parse(fixedJson);
                     console.log("✅ Successfully parsed JSON after fixes");
                     return parsedFixed;
                 } catch (fixError) {
                     console.error("❌ All parsing attempts failed");
-                    throw new Error(`Failed to parse AI response even after fixes: ${error.message}. Raw response: ${rawText.substring(0, 200)}...`);
+                    throw new Error(`Failed to parse AI response even after fixes: ${error.message}.`);
                 }
             }
         }
         
         const generateCombinedCsv = (allInvoicesData) => {
-            const headers = [ 'sl_no', 'description', 'hsn_no', 'qty', 'rate', 'amount', 'invoice_no', 'invoice_date', 'due_date', 'vendor_name', 'vendor_address', 'vendor_gstin', 'vendor_phone', 'customer_name', 'customer_address', 'customer_phone', 'customer_gstin', 'total', 'discount', 'taxable_amount', 'sgst', 'cgst', 'payable_amount' ];
+            // --- MODIFICATION 2: UPGRADED CSV HEADERS ---
+            const headers = [ 'sl_no', 'description', 'hsn_no', 'qty', 'rate', 'amount', 'invoice_no', 'invoice_date', 'due_date', 'vendor_name', 'vendor_address', 'vendor_gstin', 'vendor_phone', 'billed_to_name', 'billed_to_address', 'billed_to_phone', 'billed_to_gstin','shipped_to_name', 'shipped_to_address', 'shipped_to_phone', 'shipped_to_gstin', 'total', 'discount', 'taxable_amount', 'sgst', 'cgst', 'payable_amount' ];
             const escapeCsvCell = (cell) => { const cellStr = String(cell === null || cell === undefined ? '' : cell); if (cellStr.includes(',')) return `"${cellStr.replace(/"/g, '""')}"`; return cellStr; };
             const allRows = [];
+
             for (const jsonData of allInvoicesData) {
-                const { invoice_details, vendor_details, customer_details, line_items, summary } = jsonData;
-                const mainDetails = [ invoice_details?.invoice_no, invoice_details?.invoice_date, invoice_details?.due_date, vendor_details?.name, vendor_details?.address, vendor_details?.gstin, vendor_details?.phone, customer_details?.name, customer_details?.address, customer_details?.phone, customer_details?.gstin, summary?.total, summary?.discount, summary?.taxable_amount, summary?.sgst, summary?.cgst, summary?.payable_amount ].map(escapeCsvCell);
+                // --- MODIFICATION 3: PULLING FROM NEW JSON STRUCTURE ---
+                const { invoice_details, vendor_details, billed_to_details, shipped_to_details, line_items, summary } = jsonData;
+                
+                // --- MODIFICATION 4: MAPPING TO NEW CSV COLUMNS ---
+                const mainDetails = [ 
+                    invoice_details?.invoice_no, invoice_details?.invoice_date, invoice_details?.due_date, 
+                    vendor_details?.name, vendor_details?.address, vendor_details?.gstin, vendor_details?.phone, 
+                    billed_to_details?.name, billed_to_details?.address, billed_to_details?.phone, billed_to_details?.gstin,
+                    shipped_to_details?.name, shipped_to_details?.address, shipped_to_details?.phone, shipped_to_details?.gstin, 
+                    summary?.total, summary?.discount, summary?.taxable_amount, summary?.sgst, summary?.cgst, summary?.payable_amount 
+                ].map(escapeCsvCell);
+
                 if (line_items && Array.isArray(line_items)) {
                     for (const item of line_items) {
                         const itemDetails = [ item.sl_no, item.description, item.hsn_no, item.qty, item.rate, item.amount ].map(escapeCsvCell);
@@ -304,7 +281,6 @@
                         let rawResponse;
 
                         if (file.type === 'application/pdf') {
-                            // Process PDF files using server endpoint
                             const formData = new FormData();
                             formData.append('pdf', file);
 
@@ -320,33 +296,22 @@
                             const processData = await processResponse.json();
 
                             if (processData.type === 'pdf' && processData.text) {
-                                console.log(`PDF text extracted (${processData.text.length} characters):`, processData.text.substring(0, 200) + '...');
-
-                                // Use PDF text content with Gemini API
                                 rawResponse = await callGeminiAPI(currentApiKey, processData.text, 'text');
-
-                                console.log(`AI response for PDF (${rawResponse.length} characters):`, rawResponse.substring(0, 200) + '...');
                             } else {
-                                console.error('PDF processing failed:', processData);
                                 throw new Error('PDF processing failed or no text extracted');
                             }
                         } else {
-                            // Process image files directly
                             const imageBase64 = await fileToBase64(file);
                             rawResponse = await callGeminiAPI(currentApiKey, imageBase64, 'image');
                         }
 
-                        // --- USE THE NEW ROBUST PARSING FUNCTION ---
                         const jsonData = findAndParseJson(rawResponse);
 
-                        // Handle both single invoice objects and arrays of invoices
                         if (Array.isArray(jsonData)) {
-                            console.log(`Found ${jsonData.length} invoices in PDF`);
                             allExtractedData.push(...jsonData);
                             successCount += jsonData.length;
                             statusP.textContent += ` ✅ Success (${jsonData.length} invoices)`;
                         } else {
-                            console.log(`Found single invoice in document`);
                             allExtractedData.push(jsonData);
                             successCount++;
                             statusP.textContent += " ✅ Success";
@@ -369,7 +334,7 @@
                 generatedCsvContent = generateCombinedCsv(allExtractedData);
                 const totalFiles = files.length;
                 const totalInvoices = allExtractedData.length;
-                finalMessage.textContent = `Processing complete! Successfully extracted ${totalInvoices} invoice${totalInvoices > 1 ? 's' : ''} from ${totalFiles} file${totalFiles > 1 ? 's' : ''}.`;
+                finalMessage.textContent = `Processing complete! Successfully extracted ${totalInvoices} invoice(s) from ${totalFiles} file(s).`;
                 resultsDiv.style.display = 'block';
                 downloadBtn.style.display = 'inline-block';
             } else if (errorCount > 0) {
